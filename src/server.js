@@ -460,32 +460,78 @@ app.put("/api/transactions/:id", async (req, res) => {
 
         const body = schema.parse(req.body);
 
-        const { rows } = await pool.query(
-            `UPDATE transactions
-       SET merchant = $1,
-           amount = $2,
-           currency = UPPER($3),
-           category = $4,
-           mcc_code = NULLIF($5, ''),
-           transaction_timestamp = $6::timestamptz
-       WHERE id = $7
-       RETURNING *`,
-            [
-                body.merchant ?? null,
-                body.amount,
-                body.currency,
-                body.category ?? null,
-                body.mcc_code ?? null,
-                body.transaction_timestamp,
-                id,
-            ]
-        );
+        const client = await pool.connect();
+        try {
+            await client.query("BEGIN");
 
-        if (!rows[0]) {
-            return res.status(404).json({ message: "Transaction not found" });
+            let merchantId = null;
+            const merchantName = body.merchant?.trim() ?? null;
+
+            if (merchantName) {
+                const merchantNormalized = merchantName.toLowerCase();
+                const mccCode = body.mcc_code || null;
+
+                let mccDescription = null;
+                if (mccCode) {
+                    const mccResult = await client.query(
+                        `SELECT COALESCE(edited_description, combined_description, usda_description, irs_description, '') AS description
+                         FROM mcc_reference WHERE mcc = $1`,
+                        [mccCode]
+                    );
+                    mccDescription = mccResult.rows[0]?.description || null;
+                }
+
+                const cacheResult = await client.query(
+                    `INSERT INTO merchant_mcc_cache (merchant_normalized, merchant_original, mcc_code, mcc_description, category)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (merchant_normalized) DO UPDATE
+                     SET merchant_original = EXCLUDED.merchant_original,
+                         mcc_code = CASE WHEN merchant_mcc_cache.manual_override THEN merchant_mcc_cache.mcc_code ELSE EXCLUDED.mcc_code END,
+                         mcc_description = CASE WHEN merchant_mcc_cache.manual_override THEN merchant_mcc_cache.mcc_description ELSE EXCLUDED.mcc_description END,
+                         category = CASE WHEN merchant_mcc_cache.manual_override THEN merchant_mcc_cache.category ELSE EXCLUDED.category END,
+                         updated_at = NOW()
+                     RETURNING id`,
+                    [merchantNormalized, merchantName, mccCode, mccDescription, body.category ?? null]
+                );
+                merchantId = cacheResult.rows[0]?.id ?? null;
+            }
+
+            const { rows } = await client.query(
+                `UPDATE transactions
+                 SET merchant = $1,
+                     amount = $2,
+                     currency = UPPER($3),
+                     category = $4,
+                     mcc_code = NULLIF($5, ''),
+                     transaction_timestamp = $6::timestamptz,
+                     merchant_id = $7
+                 WHERE id = $8
+                 RETURNING *`,
+                [
+                    merchantName,
+                    body.amount,
+                    body.currency,
+                    body.category ?? null,
+                    body.mcc_code ?? null,
+                    body.transaction_timestamp,
+                    merchantId,
+                    id,
+                ]
+            );
+
+            if (!rows[0]) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Transaction not found" });
+            }
+
+            await client.query("COMMIT");
+            return res.json(rows[0]);
+        } catch (err) {
+            await client.query("ROLLBACK");
+            throw err;
+        } finally {
+            client.release();
         }
-
-        return res.json(rows[0]);
     } catch (error) {
         if (error instanceof z.ZodError) {
             return res.status(400).json({ message: "Invalid payload", issues: error.issues });
