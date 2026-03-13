@@ -59,6 +59,67 @@ app.get("/api/accounts", async (_req, res) => {
     }
 });
 
+app.get("/api/accounts/overview", async (_req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `SELECT
+                a.id,
+                a.bank,
+                a.identifier,
+                COUNT(t.id)::int AS transaction_count,
+                COALESCE(SUM(t.amount), 0)::numeric(12,2) AS total_spending,
+                COALESCE(AVG(t.amount), 0)::numeric(12,2) AS average_transaction
+             FROM accounts a
+             LEFT JOIN transactions t ON t.account_id = a.id
+             GROUP BY a.id, a.bank, a.identifier
+             ORDER BY total_spending DESC, a.bank ASC, a.identifier ASC NULLS LAST`
+        );
+
+        return res.json(
+            rows.map((row) => ({
+                id: row.id,
+                bank: row.bank,
+                identifier: row.identifier,
+                transaction_count: Number(row.transaction_count || 0),
+                total_spending: Number(row.total_spending || 0),
+                average_transaction: Number(row.average_transaction || 0),
+            }))
+        );
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+});
+
+app.post("/api/accounts", async (req, res) => {
+    try {
+        const schema = z.object({
+            bank: z.string().trim().min(1),
+            identifier: z.string().trim().max(120).optional().nullable(),
+        });
+
+        const body = schema.parse(req.body);
+
+        const { rows } = await pool.query(
+            `INSERT INTO accounts (bank, identifier)
+             VALUES ($1, NULLIF($2, ''))
+             RETURNING id, bank, identifier, created_at`,
+            [body.bank, body.identifier ?? null]
+        );
+
+        return res.status(201).json(rows[0]);
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return res.status(400).json({ message: "Invalid payload", issues: error.issues });
+        }
+
+        if (error?.code === "23505") {
+            return res.status(409).json({ message: "Account already exists" });
+        }
+
+        return res.status(500).json({ message: error.message });
+    }
+});
+
 app.get("/api/mcc", async (req, res) => {
     try {
         const query = String(req.query.q || "").trim();
@@ -99,8 +160,10 @@ app.get("/api/transactions", async (req, res) => {
         });
 
         const parsed = schema.parse(req.query);
-        const limit = Math.min(Number(parsed.limit || 50), 200);
-        const offset = Number(parsed.offset || 0);
+        const parsedLimit = Number(parsed.limit || 50);
+        const parsedOffset = Number(parsed.offset || 0);
+        const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+        const offset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
 
         const where = [];
         const values = [];
@@ -127,7 +190,17 @@ app.get("/api/transactions", async (req, res) => {
 
         const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-        values.push(limit, offset);
+        const countResult = await pool.query(
+            `SELECT COUNT(*)::int AS total_items
+       FROM transactions t
+       ${whereSql}`,
+            values
+        );
+
+        const totalItems = Number(countResult.rows[0]?.total_items || 0);
+        const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
+        const dataValues = [...values, limit, offset];
 
         const { rows } = await pool.query(
             `SELECT
@@ -151,11 +224,17 @@ app.get("/api/transactions", async (req, res) => {
        LEFT JOIN mcc_reference mr ON mr.mcc = t.mcc_code
        ${whereSql}
        ORDER BY t.transaction_timestamp DESC
-       LIMIT $${values.length - 1} OFFSET $${values.length}`,
-            values
+       LIMIT $${dataValues.length - 1} OFFSET $${dataValues.length}`,
+            dataValues
         );
 
-        return res.json(rows);
+        return res.json({
+            items: rows,
+            total_items: totalItems,
+            total_pages: totalPages,
+            limit,
+            offset,
+        });
     } catch (error) {
         if (error instanceof z.ZodError) {
             return res.status(400).json({ message: "Invalid query parameters", issues: error.issues });
@@ -312,6 +391,57 @@ app.get("/api/overview/timeseries", async (req, res) => {
         if (error instanceof z.ZodError) {
             return res.status(400).json({ message: "Invalid query parameters", issues: error.issues });
         }
+        return res.status(500).json({ message: error.message });
+    }
+});
+
+app.post("/api/transactions", async (req, res) => {
+    try {
+        const schema = z.object({
+            account_id: z.coerce.number().int().positive(),
+            merchant: z.string().nullable().optional(),
+            amount: z.coerce.number().finite(),
+            currency: z.string().length(3),
+            category: z.string().nullable().optional(),
+            mcc_code: z.string().max(4).nullable().optional(),
+            transaction_timestamp: z.string(),
+        });
+
+        const body = schema.parse(req.body);
+
+        const { rows } = await pool.query(
+            `INSERT INTO transactions (
+                account_id,
+                merchant,
+                amount,
+                currency,
+                category,
+                mcc_code,
+                transaction_timestamp
+            )
+            VALUES ($1, $2, $3, UPPER($4), $5, NULLIF($6, ''), $7::timestamptz)
+            RETURNING *`,
+            [
+                body.account_id,
+                body.merchant ?? null,
+                body.amount,
+                body.currency,
+                body.category ?? null,
+                body.mcc_code ?? null,
+                body.transaction_timestamp,
+            ]
+        );
+
+        return res.status(201).json(rows[0]);
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return res.status(400).json({ message: "Invalid payload", issues: error.issues });
+        }
+
+        if (error?.code === "23503") {
+            return res.status(400).json({ message: "Invalid account_id" });
+        }
+
         return res.status(500).json({ message: error.message });
     }
 });
