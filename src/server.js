@@ -13,6 +13,13 @@ function isTruthyEnv(value) {
     return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
+function normalizeMerchant(name) {
+    return name
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+}
+
 const corsDisabled = isTruthyEnv(process.env.CORS_DISABLED);
 const allowedOrigins = String(process.env.CORS_ORIGIN || "http://localhost:5173")
     .split(",")
@@ -468,7 +475,7 @@ app.put("/api/transactions/:id", async (req, res) => {
             const merchantName = body.merchant?.trim() ?? null;
 
             if (merchantName) {
-                const merchantNormalized = merchantName.toLowerCase();
+                const merchantNormalized = normalizeMerchant(merchantName);
                 const mccCode = body.mcc_code || null;
 
                 let mccDescription = null;
