@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id BIGSERIAL PRIMARY KEY,
   bank TEXT NOT NULL,
   identifier TEXT,
+  card_alias TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(bank, identifier)
 );
