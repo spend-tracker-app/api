@@ -120,8 +120,8 @@ app.get("/api/accounts/overview", async (_req, res) => {
                 a.identifier,
                 a.card_alias,
                 COUNT(t.id)::int AS transaction_count,
-                COALESCE(SUM(t.amount), 0)::numeric(12,2) AS total_spending,
-                COALESCE(AVG(t.amount), 0)::numeric(12,2) AS average_transaction
+                COALESCE(SUM(t.amount_base_currency), 0)::numeric(12,2) AS total_spending,
+                COALESCE(AVG(t.amount_base_currency), 0)::numeric(12,2) AS average_transaction
              FROM accounts a
              LEFT JOIN transactions t ON t.account_id = a.id
              GROUP BY a.id, a.bank, a.identifier
